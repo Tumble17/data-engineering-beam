@@ -21,6 +21,9 @@ from apache_beam.utils.timestamp import Timestamp
 
 import json
 import colouredlogs, logging
+import random
+
+import numpy as np
 
 # ====================================================================
 # Config
@@ -258,6 +261,8 @@ with beam.Pipeline(runner=None, options=PipelineOptions(), argv=None) as p:
     # API: https://beam.apache.org/releases/pydoc/2.25.0/_modules/apache_beam/transforms/util.html#KvSwap
     # ==============
     rick_morty_swapped_tuples = rick_morty_tuples | "Key-Value swap" >> beam.KvSwap()
+
+    logger.info(f"Completed KvSwap")
     # ==============
     # Map
     # Applies a simple 1-to-1 mapping function over each element in the collection.
@@ -289,7 +294,7 @@ with beam.Pipeline(runner=None, options=PipelineOptions(), argv=None) as p:
     # Map with side inputs as iterators (PAS)
     # --------------------------------------------------------------------
     # Map with side inputs as dictionaries (PAS)
-
+    logger.info(f"Completed Map")
     # ==============
     # ParDo
     # A transform for generic parallel processing.
@@ -353,31 +358,160 @@ with beam.Pipeline(runner=None, options=PipelineOptions(), argv=None) as p:
                     ),
                     "# -----------",
                     "# ===========",
-                    "\n"
+                    "\n",
                 ]
             )
 
-    rick_morty_analysis = (
+    rick_morty_timestamped_windowed_lines = (
         rick_morty_lines
         | "Add timestamps"
         >> beam.Map(lambda elem: beam.window.TimestampedValue(elem, Timestamp.now()))
         | "Place into 30 second windows"
         >> beam.WindowInto(beam.window.FixedWindows(30))
-        | "Analyze element" >> beam.ParDo(AnalyzeElement())
-        | beam.Map(print)
     )
 
+    rick_morty_analysed_lines = (
+        rick_morty_timestamped_windowed_lines
+        | "Analyze element" >> beam.ParDo(AnalyzeElement())
+    )
+    # --------------------------------------------------------------------
+    # ParDo with DoFn methods
+    # DoFn API: https://beam.apache.org/releases/pydoc/2.25.0/_modules/apache_beam/transforms/core.html#DoFn
+
+    class DoFnMethods(beam.DoFn):
+        def __init__(self):
+            print("__init__")
+            self.window = beam.window.GlobalWindow()
+
+        def setup(self):
+            # DoFn.setup()
+            #   - Initialization and can be called more than once
+            #   - Connect to databases, open network connections or other resources
+            print("setup")
+
+        def start_bundle(self):
+            # DoFn.start_bundle()
+            #   - Called once per bundle of elements before calling process
+            #   - Keeping track of bundle elements
+            print("start_bundle")
+
+        def process(self, element, window=beam.DoFn.WindowParam):
+            # DoFn.process(element, *args, **kwargs)
+            #   - Required
+            #   - Called once per element and yields zero or more elements
+            self.window = window
+            yield "* process: " + element
+
+        def finish_bundle(self):
+            # DoFn.finish_bundle()
+            #   - Called once per bundle of elements after calling process
+            #   - Batch calls on a bundle of elements such as running a database query
+            #   - Yielded elements must be of type apache_beam.utils.windowed_value.WindowedValue
+            #       - Need to provide a unix timestamp and window that you can get from the last processed element
+            yield beam.utils.windowed_value.WindowedValue(
+                value="* finish_bundle",
+                timestamp=0,
+                windows=[self.window],
+            )
+
+        def teardown(self):
+            # DoFn.teardown()
+            #   - Called once per DoFn instance when shutting down
+            #   - Close database instances, network connections and other resources
+            #   - Best effort, may fail if the worker crashes
+            print("teardown")
+
+    rick_morty_procssed_lines = (
+        rick_morty_timestamped_windowed_lines
+        | "ParDo with DoFn methods" >> beam.ParDo(DoFnMethods())
+    )
+
+    logger.info(f"Completed ParDo")
     # ==============
     # Partition
     # ==============
+    # Separates elements in a collection into multiple output collections.
+    # The number of partitions must be determined at graph construction time, you cannot determine the number of partitions inside the pipeline after construction.
+    # Examples: https://beam.apache.org/documentation/transforms/python/elementwise/partition/
+    # API: https://beam.apache.org/releases/pydoc/2.27.0/apache_beam.transforms.core.html#apache_beam.transforms.core.Partition
+    # --------------------------------------------------------------------
+    # Partition with a function (PAS)
+    # --------------------------------------------------------------------
+    # Partition with a lambda (PAS)
+    # --------------------------------------------------------------------
+    # Partition with multiple arguments
+    # (Example chosen as it had an interesting use case for ML)
+    def split_dataset(element, num_partitions, ratio):
+        assert num_partitions == len(ratio)
+
+        total = sum(ratio)
+        ratio_boundaries = np.cumsum(ratio)
+
+        random_int = random.randint(0, total)
+
+        bucket = list(map(lambda k: k >= random_int, ratio_boundaries)).index(True)
+
+        return bucket
+
+    (
+        train,
+        test,
+    ) = rick_morty_lines | "Partition with multiple arguments" >> beam.Partition(
+        split_dataset, 2, ratio=[70, 30]
+    )
+
+    logger.info(f"Completed Partition")
     # ==============
     # Regex
     # ==============
+    # Filters input string elements based on a regular expression. Can transform
+    # Examples: https://beam.apache.org/documentation/transforms/python/elementwise/regex/
+    # API: https://beam.apache.org/releases/pydoc/2.27.0/apache_beam.transforms.util.html#apache_beam.transforms.util.Regex
+    # Use r'raw-string' rather than 'escaped-string' to avoid unexpected string escaping
+    # --------------------------------------------------------------------
+    # Regex match
+    # Regex.matches keeps elements that match the regex, returning the matched group
+    explanation_regex = r"^.*!+.*$"  # ! between anything before and anything after
+
+    explanation_lines = rick_morty_lines | "Regex match" >> beam.Regex.matches(
+        explanation_regex
+    )
+
+    # --------------------------------------------------------------------
+    # Regex match with all groups
+    # --------------------------------------------------------------------
+    # Regex match into key-value pairs
+    # --------------------------------------------------------------------
+    # Regex find
+    # To start matching at any point instead of the beginning of the string, use Regex.find
+    # --------------------------------------------------------------------
+    # Regex find all
+    # --------------------------------------------------------------------
+    # Regex find as key-value pairs
+    # --------------------------------------------------------------------
+    # Regex replace all
+    morty_replaced_lines = (
+        rick_morty_lines
+        | "Out with Morty in with Blorty" >> beam.Regex.replace_all(r"Morty", "Blorty")
+    )
+    # --------------------------------------------------------------------
+    # Regex replace first
+    # --------------------------------------------------------------------
+    # Regex split
+    rick_morty_words = (
+        rick_morty_lines
+        | "Regex split" >> beam.Regex.split(r"[\s,]+")
+    )
+
+    logger.info(f"Completed Regex")
     # ==============
     # Reify
+    # Jira: https://issues.apache.org/jira/browse/BEAM-7389
     # ==============
     # ==============
     # ToString
+    # Examples: https://beam.apache.org/documentation/transforms/python/elementwise/tostring/
+    # API: https://beam.apache.org/releases/pydoc/2.27.0/apache_beam.transforms.util.html#apache_beam.transforms.util.ToString
     # ==============
     # ==============
     # WithTimestamps
